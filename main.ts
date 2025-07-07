@@ -111,7 +111,31 @@ export default class SlackSyncPlugin extends Plugin {
     // Get last sync timestamp for this channel
     const lastSyncTimestamp = this.settings.lastSyncTimestamps[channelName] || '0';
     
-    const url = `https://slack.com/api/conversations.history?channel=${channelName}&limit=50&oldest=${lastSyncTimestamp}`;
+    // First, get the channel ID from the channel name
+    let channelId = channelName;
+    try {
+      const channelListResponse = await requestUrl({
+        url: 'https://slack.com/api/conversations.list',
+        headers: {
+          'Authorization': `Bearer ${this.settings.slackToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (channelListResponse.json.ok) {
+        const channel = channelListResponse.json.channels.find((ch: any) => ch.name === channelName);
+        if (channel) {
+          channelId = channel.id;
+          console.log(`Channel ${channelName} resolved to ID: ${channelId}`);
+        } else {
+          console.log(`Channel ${channelName} not found, using as-is`);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to resolve channel ID:', error);
+    }
+    
+    const url = `https://slack.com/api/conversations.history?channel=${channelId}&limit=50&oldest=${lastSyncTimestamp}`;
     
     const response = await requestUrl({
       url: url,
@@ -208,11 +232,11 @@ export default class SlackSyncPlugin extends Plugin {
 
     // Process each message individually
     for (const message of newMessages) {
-      await this.createMessageFile(message, channelName, workspaceUrl);
+      await this.createMessageFile(message, channelName, workspaceUrl, channelId);
     }
   }
 
-  async createMessageFile(message: any, channelName: string, workspaceUrl: string) {
+  async createMessageFile(message: any, channelName: string, workspaceUrl: string, channelId: string) {
     const timestamp = new Date(parseFloat(message.ts) * 1000);
     const userName = message.userDisplayName || message.user || 'Unknown';
     
@@ -348,7 +372,7 @@ export default class SlackSyncPlugin extends Plugin {
     const fileName = `${dateString}_${documentTitle}.md`;
     const filePath = `${this.settings.outputFolder}/${fileName}`;
 
-    const markdown = this.generateSingleMessageMarkdown(threadMessages, aiSummary, extractedTags, workspaceUrl, channelName);
+    const markdown = this.generateSingleMessageMarkdown(threadMessages, aiSummary, extractedTags, workspaceUrl, channelId);
 
     // Create the file (overwrite if exists for individual messages)
     await this.app.vault.adapter.write(filePath, markdown);
@@ -394,7 +418,7 @@ updated: ${now.toISOString()}`;
     return markdown;
   }
 
-  generateSingleMessageMarkdown(messages: any[], aiSummary: string = '', extractedTags: string[] = [], workspaceUrl: string = '', channelName: string = ''): string {
+  generateSingleMessageMarkdown(messages: any[], aiSummary: string = '', extractedTags: string[] = [], workspaceUrl: string = '', channelId: string = ''): string {
     const now = new Date();
     const dateString = now.toISOString().split('T')[0];
     
@@ -406,15 +430,20 @@ created: ${dateString}
 updated: ${now.toISOString()}`;
     
     // Add Slack URL if available (link to the main message)
-    if (workspaceUrl && channelName && messages.length > 0) {
+    if (workspaceUrl && channelId && messages.length > 0) {
       const mainMessage = messages[0];
       if (mainMessage.ts) {
-        const slackUrl = `${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace('.', '')}`;
+        const slackUrl = `${workspaceUrl}/archives/${channelId}/p${mainMessage.ts.replace('.', '')}`;
         console.log('Adding Slack URL to front-matter:', slackUrl);
         markdown += `\nslack_url: ${slackUrl}`;
       }
     } else {
-      console.log('Slack URL not added:', { workspaceUrl, channelName, messagesLength: messages.length });
+      console.log('Slack URL not added:', { 
+        workspaceUrl: workspaceUrl || 'MISSING', 
+        channelId: channelId || 'MISSING', 
+        messagesLength: messages.length,
+        firstMessageTs: messages.length > 0 ? messages[0].ts : 'NO_MESSAGES'
+      });
     }
     
     // Add tags only if there are any
