@@ -129,8 +129,12 @@ var SlackSyncPlugin = class extends import_obsidian.Plugin {
           "Content-Type": "application/json"
         }
       });
+      console.log("Team info response:", teamResponse.json);
       if (teamResponse.json.ok) {
         workspaceUrl = `https://${teamResponse.json.team.domain}.slack.com`;
+        console.log("Workspace URL generated:", workspaceUrl);
+      } else {
+        console.error("Team info API error:", teamResponse.json.error);
       }
     } catch (error) {
       console.error("Failed to get workspace info:", error);
@@ -269,12 +273,12 @@ var SlackSyncPlugin = class extends import_obsidian.Plugin {
         console.error("Failed to generate AI summary:", error);
       }
     }
+    const dateString = timestamp.toISOString().split("T")[0].replace(/-/g, "");
     if (!documentTitle) {
       const fallbackTitle = this.generateFallbackTitle(threadMessages);
-      const dateString = timestamp.toISOString().split("T")[0].replace(/-/g, "");
-      documentTitle = fallbackTitle || `${dateString}_${userName}_${timestamp.getHours()}${timestamp.getMinutes()}`;
+      documentTitle = fallbackTitle || `${userName}_${timestamp.getHours()}${timestamp.getMinutes()}`;
     }
-    const fileName = `${documentTitle}.md`;
+    const fileName = `${dateString}_${documentTitle}.md`;
     const filePath = `${this.settings.outputFolder}/${fileName}`;
     const markdown = this.generateSingleMessageMarkdown(threadMessages, aiSummary, extractedTags, workspaceUrl, channelName);
     await this.app.vault.adapter.write(filePath, markdown);
@@ -319,9 +323,13 @@ updated: ${now.toISOString()}`;
     if (workspaceUrl && channelName && messages.length > 0) {
       const mainMessage = messages[0];
       if (mainMessage.ts) {
+        const slackUrl = `${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace(".", "")}`;
+        console.log("Adding Slack URL to front-matter:", slackUrl);
         markdown += `
-slack_url: ${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace(".", "")}`;
+slack_url: ${slackUrl}`;
       }
+    } else {
+      console.log("Slack URL not added:", { workspaceUrl, channelName, messagesLength: messages.length });
     }
     if (uniqueTags.length > 0) {
       markdown += `

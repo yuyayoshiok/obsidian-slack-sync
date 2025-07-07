@@ -148,8 +148,12 @@ export default class SlackSyncPlugin extends Plugin {
         }
       });
       
+      console.log('Team info response:', teamResponse.json);
       if (teamResponse.json.ok) {
         workspaceUrl = `https://${teamResponse.json.team.domain}.slack.com`;
+        console.log('Workspace URL generated:', workspaceUrl);
+      } else {
+        console.error('Team info API error:', teamResponse.json.error);
       }
     } catch (error) {
       console.error('Failed to get workspace info:', error);
@@ -334,14 +338,14 @@ export default class SlackSyncPlugin extends Plugin {
       }
     }
 
-    // Use fallback title if no title was generated
+    // Add date prefix to title
+    const dateString = timestamp.toISOString().split('T')[0].replace(/-/g, '');
     if (!documentTitle) {
       const fallbackTitle = this.generateFallbackTitle(threadMessages);
-      const dateString = timestamp.toISOString().split('T')[0].replace(/-/g, '');
-      documentTitle = fallbackTitle || `${dateString}_${userName}_${timestamp.getHours()}${timestamp.getMinutes()}`;
+      documentTitle = fallbackTitle || `${userName}_${timestamp.getHours()}${timestamp.getMinutes()}`;
     }
 
-    const fileName = `${documentTitle}.md`;
+    const fileName = `${dateString}_${documentTitle}.md`;
     const filePath = `${this.settings.outputFolder}/${fileName}`;
 
     const markdown = this.generateSingleMessageMarkdown(threadMessages, aiSummary, extractedTags, workspaceUrl, channelName);
@@ -405,8 +409,12 @@ updated: ${now.toISOString()}`;
     if (workspaceUrl && channelName && messages.length > 0) {
       const mainMessage = messages[0];
       if (mainMessage.ts) {
-        markdown += `\nslack_url: ${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace('.', '')}`;
+        const slackUrl = `${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace('.', '')}`;
+        console.log('Adding Slack URL to front-matter:', slackUrl);
+        markdown += `\nslack_url: ${slackUrl}`;
       }
+    } else {
+      console.log('Slack URL not added:', { workspaceUrl, channelName, messagesLength: messages.length });
     }
     
     // Add tags only if there are any
