@@ -202,150 +202,155 @@ export default class SlackSyncPlugin extends Plugin {
     this.settings.lastSyncTimestamps[channelName] = newestTimestamp;
     await this.saveSettings();
 
-    // Generate AI summary first to get the title and tags
+    // Process each message individually
+    for (const message of newMessages) {
+      await this.createMessageFile(message, channelName, workspaceUrl);
+    }
+  }
+
+  async createMessageFile(message: any, channelName: string, workspaceUrl: string) {
+    const timestamp = new Date(parseFloat(message.ts) * 1000);
+    const userName = message.userDisplayName || message.user || 'Unknown';
+    
+    // Fetch thread replies if this message has replies
+    let threadMessages = [message];
+    if (message.reply_count && message.reply_count > 0) {
+      try {
+        const threadResponse = await requestUrl({
+          url: `https://slack.com/api/conversations.replies?channel=${channelName}&ts=${message.ts}`,
+          headers: {
+            'Authorization': `Bearer ${this.settings.slackToken}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (threadResponse.json.ok && threadResponse.json.messages) {
+          threadMessages = threadResponse.json.messages;
+          
+          // Get user info for thread replies
+          const threadUserIds = [...new Set(threadMessages.map((msg: any) => msg.user).filter(Boolean))];
+          const threadUserInfoMap = new Map();
+          
+          for (const userId of threadUserIds) {
+            try {
+              const userResponse = await requestUrl({
+                url: `https://slack.com/api/users.info?user=${userId}`,
+                headers: {
+                  'Authorization': `Bearer ${this.settings.slackToken}`,
+                  'Content-Type': 'application/json'
+                }
+              });
+              
+              const userData = userResponse.json;
+              if (userData.ok) {
+                const displayName = userData.user.profile?.display_name || 
+                                 userData.user.profile?.real_name || 
+                                 userData.user.name || 
+                                 userId;
+                threadUserInfoMap.set(userId, displayName);
+              } else {
+                threadUserInfoMap.set(userId, userId);
+              }
+            } catch (error) {
+              console.error(`Failed to get user info for ${userId}:`, error);
+              threadUserInfoMap.set(userId, userId);
+            }
+          }
+          
+          // Add user display names and URLs to thread messages
+          threadMessages.forEach((msg: any) => {
+            if (msg.user) {
+              msg.userDisplayName = threadUserInfoMap.get(msg.user) || msg.user;
+            }
+            if (workspaceUrl && msg.ts) {
+              msg.slackUrl = `${workspaceUrl}/archives/${channelName}/p${msg.ts.replace('.', '')}`;
+            }
+          });
+        }
+      } catch (error) {
+        console.error('Failed to fetch thread replies:', error);
+      }
+    }
+
+    // Generate AI summary for the message (and thread if exists)
     let aiSummary = '';
-    let documentTitle = `${this.getDateString()}_slack_${channelName}`;
+    let documentTitle = '';
     let extractedTags: string[] = [];
     
     if (this.settings.enableAISummary) {
-      console.log('AI Summary is enabled, generating summary...');
       try {
-        aiSummary = await this.generateAISummary(channelName, newMessages);
-        console.log('AI Summary result:', aiSummary);
+        aiSummary = await this.generateAISummary(channelName, threadMessages);
         
         if (aiSummary && aiSummary.trim().length > 0) {
-          console.log('AI Summary generated successfully');
-          
-          // Extract title from AI summary (improved extraction)
+          // Extract title from AI summary
           const titleMatch = aiSummary.match(/## (.+?)(?:\n|$)/);
-          console.log('Title match result:', titleMatch);
           
           if (titleMatch) {
             let rawTitle = titleMatch[1].trim();
-            console.log('Raw title extracted:', rawTitle);
-            
-            // Remove common unwanted words like "タイトル", "title", etc.
             rawTitle = rawTitle
-              .replace(/^(タイトル|title)[:：\s]*/, '') // Remove "タイトル:" or "title:" prefix
-              .replace(/(タイトル|title)$/, '') // Remove "タイトル" or "title" suffix
+              .replace(/^(タイトル|title)[:：\s]*/, '')
+              .replace(/(タイトル|title)$/, '')
               .trim();
             
-            console.log('Title after cleaning:', rawTitle);
-            
-            // Clean title for filename
             const cleanTitle = rawTitle
-              .replace(/[<>:"/\\|?*]/g, '') // Remove invalid filename characters
-              .replace(/\s+/g, '_') // Replace spaces with underscores
-              .substring(0, 50); // Limit length
-            
-            console.log('Clean title for filename:', cleanTitle);
+              .replace(/[<>:"/\\|?*]/g, '')
+              .replace(/\s+/g, '_')
+              .substring(0, 50);
             
             if (cleanTitle.length > 0 && cleanTitle !== 'タイトル' && cleanTitle !== 'title') {
-              documentTitle = `${this.getDateString()}_${cleanTitle}`;
-              console.log('Final document title:', documentTitle);
-            } else {
-              console.log('Title was empty or invalid after cleaning, using default');
+              documentTitle = cleanTitle;
             }
-          } else {
-            console.log('No title found in AI summary, using default');
           }
           
-          // Extract tags from AI summary (improved extraction)
-          console.log('AI Summary for tag extraction:', aiSummary);
-          
-          // Try multiple patterns to extract tags
+          // Extract tags from AI summary
           const tagPatterns = [
-            /tags:\s*\n((?:\s*-\s*[^\n]+\n?)+)/i,  // YAML tags format
-            /#([\w一-龯ひらがなカタカナ・]+)/g,      // Hashtag format
-            /(?:タグ|tag)[:：]\s*([^\n]+)/i,        // Tag: format
-            /(?:関連|related)[:：]\s*([^\n]+)/i     // Related: format
+            /tags:\s*\n((?:\s*-\s*[^\n]+\n?)+)/i,
+            /#([\w一-龯ひらがなカタカナ・]+)/g,
+            /(?:タグ|tag)[:：]\s*([^\n]+)/i,
+            /(?:関連|related)[:：]\s*([^\n]+)/i
           ];
           
           for (const pattern of tagPatterns) {
             const matches = aiSummary.match(pattern);
             if (matches) {
               if (pattern.source.includes('tags:')) {
-                // Extract from YAML format
                 const yamlTags = matches[1].match(/- ([^\n]+)/g);
                 if (yamlTags) {
                   extractedTags = yamlTags.map(tag => tag.replace('- ', '').trim());
-                  console.log('Tags extracted from YAML:', extractedTags);
                   break;
                 }
               } else if (pattern.global) {
-                // Extract hashtags
                 extractedTags = Array.from(aiSummary.matchAll(pattern)).map(match => match[1]);
-                console.log('Tags extracted from hashtags:', extractedTags);
                 break;
-                             } else {
-                 // Extract from other formats (including "タグ: tag1, tag2, tag3")
-                 extractedTags = matches[1].split(/[,、\s]+/).filter(tag => tag.trim().length > 0);
-                 console.log('Tags extracted from other format:', extractedTags);
-                 break;
-               }
+              } else {
+                extractedTags = matches[1].split(/[,、\s]+/).filter(tag => tag.trim().length > 0);
+                break;
+              }
             }
-          }
-          
-          if (extractedTags.length === 0) {
-            console.log('No tags found in AI summary');
-          }
-        } else {
-          console.log('AI Summary was empty, generating fallback title');
-          // Generate fallback title from message content
-          const fallbackTitle = this.generateFallbackTitle(newMessages);
-          if (fallbackTitle) {
-            documentTitle = `${this.getDateString()}_${fallbackTitle}`;
-            console.log('Using fallback title:', documentTitle);
           }
         }
       } catch (error) {
         console.error('Failed to generate AI summary:', error);
-        new Notice(`AI Summary failed: ${error.message}`);
-        
-        // Generate fallback title from message content
-        const fallbackTitle = this.generateFallbackTitle(newMessages);
-        if (fallbackTitle) {
-          documentTitle = `${this.getDateString()}_${fallbackTitle}`;
-          console.log('Using fallback title after AI error:', documentTitle);
-        }
       }
-    } else {
-      console.log('AI Summary is disabled in settings');
-      
-      // Generate fallback title from message content when AI is disabled
-      const fallbackTitle = this.generateFallbackTitle(newMessages);
-      if (fallbackTitle) {
-        documentTitle = `${this.getDateString()}_${fallbackTitle}`;
-        console.log('Using fallback title (AI disabled):', documentTitle);
-      }
+    }
+
+    // Use fallback title if no title was generated
+    if (!documentTitle) {
+      const fallbackTitle = this.generateFallbackTitle(threadMessages);
+      const dateString = timestamp.toISOString().split('T')[0].replace(/-/g, '');
+      documentTitle = fallbackTitle || `${dateString}_${userName}_${timestamp.getHours()}${timestamp.getMinutes()}`;
     }
 
     const fileName = `${documentTitle}.md`;
     const filePath = `${this.settings.outputFolder}/${fileName}`;
 
-    let markdown = this.generateMarkdown(channelName, newMessages, aiSummary, extractedTags);
+    const markdown = this.generateSingleMessageMarkdown(threadMessages, aiSummary, extractedTags, workspaceUrl, channelName);
 
-    // Check if file exists and append if it does
-    const fileExists = await this.app.vault.adapter.exists(filePath);
-    if (fileExists) {
-      const existingContent = await this.app.vault.adapter.read(filePath);
-      const newMessagesMarkdown = this.generateMessagesMarkdown(newMessages);
-      let updatedContent = existingContent + '\n' + newMessagesMarkdown;
-      
-      // Add AI summary for new messages if enabled
-      if (this.settings.enableAISummary && aiSummary) {
-        updatedContent = existingContent + '\n\n' + aiSummary + '\n\n---\n\n' + newMessagesMarkdown;
-      } else {
-        updatedContent = existingContent + '\n\n---\n\n' + newMessagesMarkdown;
-      }
-      
-      await this.app.vault.adapter.write(filePath, updatedContent);
-    } else {
-      await this.app.vault.create(filePath, markdown);
-    }
+    // Create the file (overwrite if exists for individual messages)
+    await this.app.vault.adapter.write(filePath, markdown);
   }
 
-  generateMarkdown(channelName: string, messages: any[], aiSummary: string = '', extractedTags: string[] = []): string {
+  generateMarkdown(channelName: string, messages: any[], aiSummary: string = '', extractedTags: string[] = [], workspaceUrl: string = ''): string {
     const now = new Date();
     const dateString = now.toISOString().split('T')[0];
     
@@ -355,6 +360,11 @@ export default class SlackSyncPlugin extends Plugin {
     let markdown = `---
 created: ${dateString}
 updated: ${now.toISOString()}`;
+    
+    // Add Slack URL if available
+    if (workspaceUrl && channelName) {
+      markdown += `\nslack_url: ${workspaceUrl}/channels/${channelName}`;
+    }
     
     // Add tags only if there are any
     if (uniqueTags.length > 0) {
@@ -380,6 +390,69 @@ updated: ${now.toISOString()}`;
     return markdown;
   }
 
+  generateSingleMessageMarkdown(messages: any[], aiSummary: string = '', extractedTags: string[] = [], workspaceUrl: string = '', channelName: string = ''): string {
+    const now = new Date();
+    const dateString = now.toISOString().split('T')[0];
+    
+    // Only use AI extracted tags, no default tags
+    const uniqueTags = extractedTags.length > 0 ? [...new Set(extractedTags)] : [];
+    
+    let markdown = `---
+created: ${dateString}
+updated: ${now.toISOString()}`;
+    
+    // Add Slack URL if available (link to the main message)
+    if (workspaceUrl && channelName && messages.length > 0) {
+      const mainMessage = messages[0];
+      if (mainMessage.ts) {
+        markdown += `\nslack_url: ${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace('.', '')}`;
+      }
+    }
+    
+    // Add tags only if there are any
+    if (uniqueTags.length > 0) {
+      markdown += `\ntags:`;
+      uniqueTags.forEach(tag => {
+        markdown += `\n  - ${tag}`;
+      });
+    }
+    
+    markdown += `
+---
+
+`;
+
+    // Add AI summary if available
+    if (aiSummary) {
+      markdown += aiSummary + '\n\n';
+      // Add separator line before Slack messages
+      markdown += '---\n\n';
+    }
+
+    // Add messages (main message + thread replies)
+    messages.forEach((message, index) => {
+      const timestamp = new Date(parseFloat(message.ts) * 1000);
+      const timeString = timestamp.toLocaleTimeString('ja-JP', { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      });
+      
+      const userName = message.userDisplayName || message.user || 'Unknown';
+      
+      if (index === 0) {
+        // Main message
+        markdown += `## ${timeString} - ${userName}\n\n`;
+      } else {
+        // Thread reply
+        markdown += `### 　└ ${timeString} - ${userName}\n\n`;
+      }
+      
+      markdown += `${message.text || ''}\n\n`;
+    });
+    
+    return markdown;
+  }
+
   generateMessagesMarkdown(messages: any[]): string {
     let markdown = '';
     messages.reverse().forEach((message) => {
@@ -390,14 +463,7 @@ updated: ${now.toISOString()}`;
       });
       
       const userName = message.userDisplayName || message.user || 'Unknown';
-      
-      // Add Slack URL if available
-      if (message.slackUrl) {
-        markdown += `## ${timeString} - ${userName} [🔗](<${message.slackUrl}>)\n\n`;
-      } else {
-        markdown += `## ${timeString} - ${userName}\n\n`;
-      }
-      
+      markdown += `## ${timeString} - ${userName}\n\n`;
       markdown += `${message.text || ''}\n\n`;
     });
     return markdown;

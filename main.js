@@ -169,44 +169,82 @@ var SlackSyncPlugin = class extends import_obsidian.Plugin {
     const newestTimestamp = Math.max(...newMessages.map((msg) => parseFloat(msg.ts))).toString();
     this.settings.lastSyncTimestamps[channelName] = newestTimestamp;
     await this.saveSettings();
+    for (const message of newMessages) {
+      await this.createMessageFile(message, channelName, workspaceUrl);
+    }
+  }
+  async createMessageFile(message, channelName, workspaceUrl) {
+    const timestamp = new Date(parseFloat(message.ts) * 1e3);
+    const userName = message.userDisplayName || message.user || "Unknown";
+    let threadMessages = [message];
+    if (message.reply_count && message.reply_count > 0) {
+      try {
+        const threadResponse = await (0, import_obsidian.requestUrl)({
+          url: `https://slack.com/api/conversations.replies?channel=${channelName}&ts=${message.ts}`,
+          headers: {
+            "Authorization": `Bearer ${this.settings.slackToken}`,
+            "Content-Type": "application/json"
+          }
+        });
+        if (threadResponse.json.ok && threadResponse.json.messages) {
+          threadMessages = threadResponse.json.messages;
+          const threadUserIds = [...new Set(threadMessages.map((msg) => msg.user).filter(Boolean))];
+          const threadUserInfoMap = /* @__PURE__ */ new Map();
+          for (const userId of threadUserIds) {
+            try {
+              const userResponse = await (0, import_obsidian.requestUrl)({
+                url: `https://slack.com/api/users.info?user=${userId}`,
+                headers: {
+                  "Authorization": `Bearer ${this.settings.slackToken}`,
+                  "Content-Type": "application/json"
+                }
+              });
+              const userData = userResponse.json;
+              if (userData.ok) {
+                const displayName = userData.user.profile?.display_name || userData.user.profile?.real_name || userData.user.name || userId;
+                threadUserInfoMap.set(userId, displayName);
+              } else {
+                threadUserInfoMap.set(userId, userId);
+              }
+            } catch (error) {
+              console.error(`Failed to get user info for ${userId}:`, error);
+              threadUserInfoMap.set(userId, userId);
+            }
+          }
+          threadMessages.forEach((msg) => {
+            if (msg.user) {
+              msg.userDisplayName = threadUserInfoMap.get(msg.user) || msg.user;
+            }
+            if (workspaceUrl && msg.ts) {
+              msg.slackUrl = `${workspaceUrl}/archives/${channelName}/p${msg.ts.replace(".", "")}`;
+            }
+          });
+        }
+      } catch (error) {
+        console.error("Failed to fetch thread replies:", error);
+      }
+    }
     let aiSummary = "";
-    let documentTitle = `${this.getDateString()}_slack_${channelName}`;
+    let documentTitle = "";
     let extractedTags = [];
     if (this.settings.enableAISummary) {
-      console.log("AI Summary is enabled, generating summary...");
       try {
-        aiSummary = await this.generateAISummary(channelName, newMessages);
-        console.log("AI Summary result:", aiSummary);
+        aiSummary = await this.generateAISummary(channelName, threadMessages);
         if (aiSummary && aiSummary.trim().length > 0) {
-          console.log("AI Summary generated successfully");
           const titleMatch = aiSummary.match(/## (.+?)(?:\n|$)/);
-          console.log("Title match result:", titleMatch);
           if (titleMatch) {
             let rawTitle = titleMatch[1].trim();
-            console.log("Raw title extracted:", rawTitle);
             rawTitle = rawTitle.replace(/^(タイトル|title)[:：\s]*/, "").replace(/(タイトル|title)$/, "").trim();
-            console.log("Title after cleaning:", rawTitle);
             const cleanTitle = rawTitle.replace(/[<>:"/\\|?*]/g, "").replace(/\s+/g, "_").substring(0, 50);
-            console.log("Clean title for filename:", cleanTitle);
             if (cleanTitle.length > 0 && cleanTitle !== "\u30BF\u30A4\u30C8\u30EB" && cleanTitle !== "title") {
-              documentTitle = `${this.getDateString()}_${cleanTitle}`;
-              console.log("Final document title:", documentTitle);
-            } else {
-              console.log("Title was empty or invalid after cleaning, using default");
+              documentTitle = cleanTitle;
             }
-          } else {
-            console.log("No title found in AI summary, using default");
           }
-          console.log("AI Summary for tag extraction:", aiSummary);
           const tagPatterns = [
             /tags:\s*\n((?:\s*-\s*[^\n]+\n?)+)/i,
-            // YAML tags format
             /#([\w一-龯ひらがなカタカナ・]+)/g,
-            // Hashtag format
             /(?:タグ|tag)[:：]\s*([^\n]+)/i,
-            // Tag: format
             /(?:関連|related)[:：]\s*([^\n]+)/i
-            // Related: format
           ];
           for (const pattern of tagPatterns) {
             const matches = aiSummary.match(pattern);
@@ -215,73 +253,43 @@ var SlackSyncPlugin = class extends import_obsidian.Plugin {
                 const yamlTags = matches[1].match(/- ([^\n]+)/g);
                 if (yamlTags) {
                   extractedTags = yamlTags.map((tag) => tag.replace("- ", "").trim());
-                  console.log("Tags extracted from YAML:", extractedTags);
                   break;
                 }
               } else if (pattern.global) {
                 extractedTags = Array.from(aiSummary.matchAll(pattern)).map((match) => match[1]);
-                console.log("Tags extracted from hashtags:", extractedTags);
                 break;
               } else {
                 extractedTags = matches[1].split(/[,、\s]+/).filter((tag) => tag.trim().length > 0);
-                console.log("Tags extracted from other format:", extractedTags);
                 break;
               }
             }
           }
-          if (extractedTags.length === 0) {
-            console.log("No tags found in AI summary");
-          }
-        } else {
-          console.log("AI Summary was empty, generating fallback title");
-          const fallbackTitle = this.generateFallbackTitle(newMessages);
-          if (fallbackTitle) {
-            documentTitle = `${this.getDateString()}_${fallbackTitle}`;
-            console.log("Using fallback title:", documentTitle);
-          }
         }
       } catch (error) {
         console.error("Failed to generate AI summary:", error);
-        new import_obsidian.Notice(`AI Summary failed: ${error.message}`);
-        const fallbackTitle = this.generateFallbackTitle(newMessages);
-        if (fallbackTitle) {
-          documentTitle = `${this.getDateString()}_${fallbackTitle}`;
-          console.log("Using fallback title after AI error:", documentTitle);
-        }
       }
-    } else {
-      console.log("AI Summary is disabled in settings");
-      const fallbackTitle = this.generateFallbackTitle(newMessages);
-      if (fallbackTitle) {
-        documentTitle = `${this.getDateString()}_${fallbackTitle}`;
-        console.log("Using fallback title (AI disabled):", documentTitle);
-      }
+    }
+    if (!documentTitle) {
+      const fallbackTitle = this.generateFallbackTitle(threadMessages);
+      const dateString = timestamp.toISOString().split("T")[0].replace(/-/g, "");
+      documentTitle = fallbackTitle || `${dateString}_${userName}_${timestamp.getHours()}${timestamp.getMinutes()}`;
     }
     const fileName = `${documentTitle}.md`;
     const filePath = `${this.settings.outputFolder}/${fileName}`;
-    let markdown = this.generateMarkdown(channelName, newMessages, aiSummary, extractedTags);
-    const fileExists = await this.app.vault.adapter.exists(filePath);
-    if (fileExists) {
-      const existingContent = await this.app.vault.adapter.read(filePath);
-      const newMessagesMarkdown = this.generateMessagesMarkdown(newMessages);
-      let updatedContent = existingContent + "\n" + newMessagesMarkdown;
-      if (this.settings.enableAISummary && aiSummary) {
-        updatedContent = existingContent + "\n\n" + aiSummary + "\n\n---\n\n" + newMessagesMarkdown;
-      } else {
-        updatedContent = existingContent + "\n\n---\n\n" + newMessagesMarkdown;
-      }
-      await this.app.vault.adapter.write(filePath, updatedContent);
-    } else {
-      await this.app.vault.create(filePath, markdown);
-    }
+    const markdown = this.generateSingleMessageMarkdown(threadMessages, aiSummary, extractedTags, workspaceUrl, channelName);
+    await this.app.vault.adapter.write(filePath, markdown);
   }
-  generateMarkdown(channelName, messages, aiSummary = "", extractedTags = []) {
+  generateMarkdown(channelName, messages, aiSummary = "", extractedTags = [], workspaceUrl = "") {
     const now = /* @__PURE__ */ new Date();
     const dateString = now.toISOString().split("T")[0];
     const uniqueTags = extractedTags.length > 0 ? [...new Set(extractedTags)] : [];
     let markdown = `---
 created: ${dateString}
 updated: ${now.toISOString()}`;
+    if (workspaceUrl && channelName) {
+      markdown += `
+slack_url: ${workspaceUrl}/channels/${channelName}`;
+    }
     if (uniqueTags.length > 0) {
       markdown += `
 tags:`;
@@ -301,6 +309,58 @@ tags:`;
     markdown += this.generateMessagesMarkdown(messages);
     return markdown;
   }
+  generateSingleMessageMarkdown(messages, aiSummary = "", extractedTags = [], workspaceUrl = "", channelName = "") {
+    const now = /* @__PURE__ */ new Date();
+    const dateString = now.toISOString().split("T")[0];
+    const uniqueTags = extractedTags.length > 0 ? [...new Set(extractedTags)] : [];
+    let markdown = `---
+created: ${dateString}
+updated: ${now.toISOString()}`;
+    if (workspaceUrl && channelName && messages.length > 0) {
+      const mainMessage = messages[0];
+      if (mainMessage.ts) {
+        markdown += `
+slack_url: ${workspaceUrl}/archives/${channelName}/p${mainMessage.ts.replace(".", "")}`;
+      }
+    }
+    if (uniqueTags.length > 0) {
+      markdown += `
+tags:`;
+      uniqueTags.forEach((tag) => {
+        markdown += `
+  - ${tag}`;
+      });
+    }
+    markdown += `
+---
+
+`;
+    if (aiSummary) {
+      markdown += aiSummary + "\n\n";
+      markdown += "---\n\n";
+    }
+    messages.forEach((message, index) => {
+      const timestamp = new Date(parseFloat(message.ts) * 1e3);
+      const timeString = timestamp.toLocaleTimeString("ja-JP", {
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+      const userName = message.userDisplayName || message.user || "Unknown";
+      if (index === 0) {
+        markdown += `## ${timeString} - ${userName}
+
+`;
+      } else {
+        markdown += `### \u3000\u2514 ${timeString} - ${userName}
+
+`;
+      }
+      markdown += `${message.text || ""}
+
+`;
+    });
+    return markdown;
+  }
   generateMessagesMarkdown(messages) {
     let markdown = "";
     messages.reverse().forEach((message) => {
@@ -310,15 +370,9 @@ tags:`;
         minute: "2-digit"
       });
       const userName = message.userDisplayName || message.user || "Unknown";
-      if (message.slackUrl) {
-        markdown += `## ${timeString} - ${userName} [\u{1F517}](<${message.slackUrl}>)
+      markdown += `## ${timeString} - ${userName}
 
 `;
-      } else {
-        markdown += `## ${timeString} - ${userName}
-
-`;
-      }
       markdown += `${message.text || ""}
 
 `;
