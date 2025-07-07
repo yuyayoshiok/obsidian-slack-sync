@@ -1,0 +1,11 @@
+{
+  "id": "obsidian-slack-sync",
+  "name": "Slack Sync",
+  "version": "2.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Sync Slack messages to Obsidian with AI summaries and auto-sync",
+  "author": "Yuya Yoshioka",
+  "authorUrl": "https://github.com/yuyayoshioka",
+  "fundingUrl": "https://github.com/sponsors/yuyayoshioka",
+  "isDesktopOnly": false
+} 
