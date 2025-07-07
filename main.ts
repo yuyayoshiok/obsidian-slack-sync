@@ -137,6 +137,24 @@ export default class SlackSyncPlugin extends Plugin {
       return;
     }
 
+    // Get workspace info for URL generation
+    let workspaceUrl = '';
+    try {
+      const teamResponse = await requestUrl({
+        url: 'https://slack.com/api/team.info',
+        headers: {
+          'Authorization': `Bearer ${this.settings.slackToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (teamResponse.json.ok) {
+        workspaceUrl = `https://${teamResponse.json.team.domain}.slack.com`;
+      }
+    } catch (error) {
+      console.error('Failed to get workspace info:', error);
+    }
+
     // Get user information for all users in the messages
     const userIds = [...new Set(newMessages.map((msg: any) => msg.user).filter(Boolean))];
     const userInfoMap = new Map();
@@ -168,10 +186,14 @@ export default class SlackSyncPlugin extends Plugin {
       }
     }
 
-    // Add user display names to messages
+    // Add user display names and URLs to messages
     newMessages.forEach((msg: any) => {
       if (msg.user) {
         msg.userDisplayName = userInfoMap.get(msg.user) || msg.user;
+      }
+      // Generate Slack permalink URL
+      if (workspaceUrl && msg.ts) {
+        msg.slackUrl = `${workspaceUrl}/archives/${channelName}/p${msg.ts.replace('.', '')}`;
       }
     });
 
@@ -368,7 +390,14 @@ updated: ${now.toISOString()}`;
       });
       
       const userName = message.userDisplayName || message.user || 'Unknown';
-      markdown += `## ${timeString} - ${userName}\n\n`;
+      
+      // Add Slack URL if available
+      if (message.slackUrl) {
+        markdown += `## ${timeString} - ${userName} [🔗](<${message.slackUrl}>)\n\n`;
+      } else {
+        markdown += `## ${timeString} - ${userName}\n\n`;
+      }
+      
       markdown += `${message.text || ''}\n\n`;
     });
     return markdown;
