@@ -164,20 +164,20 @@ export default class SlackSyncPlugin extends Plugin {
     // Get workspace info for URL generation
     let workspaceUrl = '';
     try {
-      const teamResponse = await requestUrl({
-        url: 'https://slack.com/api/team.info',
+      const authResponse = await requestUrl({
+        url: 'https://slack.com/api/auth.test',
         headers: {
           'Authorization': `Bearer ${this.settings.slackToken}`,
           'Content-Type': 'application/json'
         }
       });
       
-      console.log('Team info response:', teamResponse.json);
-      if (teamResponse.json.ok) {
-        workspaceUrl = `https://${teamResponse.json.team.domain}.slack.com`;
+      console.log('Auth test response:', authResponse.json);
+      if (authResponse.json.ok) {
+        workspaceUrl = `https://${authResponse.json.team}.slack.com`;
         console.log('Workspace URL generated:', workspaceUrl);
       } else {
-        console.error('Team info API error:', teamResponse.json.error);
+        console.error('Auth test API error:', authResponse.json.error);
       }
     } catch (error) {
       console.error('Failed to get workspace info:', error);
