@@ -103,7 +103,6 @@ export default class SlackSyncPlugin extends Plugin {
       new Notice('Slack sync completed successfully!');
     } catch (error) {
       new Notice('Error during Slack sync: ' + error.message);
-      console.error('Slack sync error:', error);
     }
   }
 
@@ -126,13 +125,10 @@ export default class SlackSyncPlugin extends Plugin {
         const channel = channelListResponse.json.channels.find((ch: any) => ch.name === channelName);
         if (channel) {
           channelId = channel.id;
-          console.log(`Channel ${channelName} resolved to ID: ${channelId}`);
-        } else {
-          console.log(`Channel ${channelName} not found, using as-is`);
         }
       }
     } catch (error) {
-      console.error('Failed to resolve channel ID:', error);
+      // Channel ID resolution failed, using channel name as-is
     }
     
     const url = `https://slack.com/api/conversations.history?channel=${channelId}&limit=50&oldest=${lastSyncTimestamp}`;
@@ -172,15 +168,11 @@ export default class SlackSyncPlugin extends Plugin {
         }
       });
       
-      console.log('Auth test response:', authResponse.json);
       if (authResponse.json.ok) {
         workspaceUrl = `https://${authResponse.json.team}.slack.com`;
-        console.log('Workspace URL generated:', workspaceUrl);
-      } else {
-        console.error('Auth test API error:', authResponse.json.error);
       }
     } catch (error) {
-      console.error('Failed to get workspace info:', error);
+      // Failed to get workspace info, continuing without workspace URL
     }
 
     // Get user information for all users in the messages
@@ -209,7 +201,6 @@ export default class SlackSyncPlugin extends Plugin {
           userInfoMap.set(userId, userId);
         }
       } catch (error) {
-        console.error(`Failed to get user info for ${userId}:`, error);
         userInfoMap.set(userId, userId);
       }
     }
@@ -280,7 +271,6 @@ export default class SlackSyncPlugin extends Plugin {
                 threadUserInfoMap.set(userId, userId);
               }
             } catch (error) {
-              console.error(`Failed to get user info for ${userId}:`, error);
               threadUserInfoMap.set(userId, userId);
             }
           }
@@ -296,7 +286,7 @@ export default class SlackSyncPlugin extends Plugin {
           });
         }
       } catch (error) {
-        console.error('Failed to fetch thread replies:', error);
+        // Failed to fetch thread replies, using only main message
       }
     }
 
@@ -358,7 +348,7 @@ export default class SlackSyncPlugin extends Plugin {
           }
         }
       } catch (error) {
-        console.error('Failed to generate AI summary:', error);
+        // AI summary generation failed, continuing without summary
       }
     }
 
@@ -434,16 +424,8 @@ updated: ${now.toISOString()}`;
       const mainMessage = messages[0];
       if (mainMessage.ts) {
         const slackUrl = `${workspaceUrl}/archives/${channelId}/p${mainMessage.ts.replace('.', '')}`;
-        console.log('Adding Slack URL to front-matter:', slackUrl);
         markdown += `\nslack_url: ${slackUrl}`;
       }
-    } else {
-      console.log('Slack URL not added:', { 
-        workspaceUrl: workspaceUrl || 'MISSING', 
-        channelId: channelId || 'MISSING', 
-        messagesLength: messages.length,
-        firstMessageTs: messages.length > 0 ? messages[0].ts : 'NO_MESSAGES'
-      });
     }
     
     // Add tags only if there are any
@@ -508,11 +490,8 @@ updated: ${now.toISOString()}`;
 
   async generateAISummary(channelName: string, messages: any[]): Promise<string> {
     if (!this.settings.enableAISummary) {
-      console.log('AI Summary is disabled');
       return '';
     }
-
-    console.log(`Generating AI summary for ${channelName} with ${messages.length} messages`);
 
     const messagesText = messages.map(msg => {
       const timestamp = new Date(parseFloat(msg.ts) * 1000);
@@ -571,7 +550,6 @@ ${messagesText}
 必ず上記の形式通りに出力してください。`;
 
     try {
-      console.log(`Using AI provider: ${this.settings.aiProvider}`);
       let result = '';
       switch (this.settings.aiProvider) {
         case 'openai':
@@ -584,13 +562,10 @@ ${messagesText}
           result = await this.callGemini(prompt);
           break;
         default:
-          console.log('Unknown AI provider');
           return '';
       }
-      console.log('AI Summary generated successfully');
       return result;
     } catch (error) {
-      console.error('AI Summary error:', error);
       new Notice(`AI Summary failed: ${error.message}`);
       return '';
     }
